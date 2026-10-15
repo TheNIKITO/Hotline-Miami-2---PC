@@ -23,3 +23,55 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
+
+# Hotline Miami 2 port: nada do jogo e nada local
+out/
+dist/
+user_bak/
+CUSA*/
+*.bak
+*.bak2
+*.o
+launcher_config.json
+launcher_last_run.log
+last_run.log
+ngs2*.txt
+crash*.txt
+patch*.py
+Hotline Miami 2.bat
+__pycache__/
+eboot.bin
+*.wad
+*.pkg
+*.sprx
+*.prx
+
+# Hotline Miami 2 port: nada do jogo e nada local
+out/
+dist/
+user_bak/
+CUSA*/
+*.bak
+*.bak2
+*.o
+launcher_config.json
+launcher_last_run.log
+last_run.log
+ngs2*.txt
+crash*.txt
+patch*.py
+Hotline Miami 2.bat
+__pycache__/
+eboot.bin
+*.wad
+*.pkg
+*.sprx
+*.prx
+c_*.txt
+run_*.txt
+runb_*.txt
+t[0-9].txt
+c_*.txt
+run_*.txt
+runb_*.txt
+t[0-9].txt
