@@ -1,0 +1,17 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Hotline Miami 2: Wrong Number",
+  "system": "PS4",
+  "type": "port",
+  "original": { "serial": "CUSA00368" },
+  "project": "Hotline Miami 2 - PC",
+  "status": "playable",
+  "targets": ["Windows"],
+  "toolchain": "gow3_pc / shadPS4",
+  "approach": "Native x86-64 execution of the PS4 executable, reimplemented system libraries, Vulkan renderer (shadPS4 video core)",
+  "maintainers": [{ "name": "TheNIKITO", "link": "https://github.com/TheNIKITO" }],
+  "links": [{ "label": "Releases", "url": "https://github.com/TheNIKITO/Hotline-Miami-2---PC/releases" }],
+  "help": ["Fullscreen, window and resolution options", "Occasional crash right at startup", "Per-voice volume and pan"],
+  "tags": ["ps4", "vulkan", "native-port", "windows"],
+  "notes": "Boots, renders, controller works, sound effects and ATRAC9 music work, launcher with folder picker and auto-retry. Known issues: occasional crash at startup (the launcher retries), no volume/pan, no window or resolution options yet. Tested on one machine and one game version. Needs your own copy of the game; none is included. Fork of gow3_pc."
+}
