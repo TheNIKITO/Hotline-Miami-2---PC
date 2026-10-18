@@ -1,8 +1,16 @@
 /* libSceNgs2 stand-ins for Hotline Miami 2.
  * - ParseWaveformData reads the game's in-memory WAV files (PCM16).
- * - Sampler voices (rack 0x1000) play PCM16 WAVs; SystemRender mixes them
- *   into the first 8-channel float buffer (left/right = channels 0/1).
- *   ATRAC9 waveforms (music) are rejected for now.
+ * - Sampler voices (rack 0x1000) play PCM16 WAVs; SystemRender mixes each one
+ *   into the buffer of the mastering voice (rack 0x3000) it is patched to,
+ *   picked by that voice's output parameter (left/right = channels 0/1), so
+ *   music and effects reach the audio ports the game meant for them. A voice
+ *   with no usable route goes to the first 8-channel float buffer.
+ *   ATRAC9 waveforms (music) are decoded on the fly.
+ * - Port volume (param 0x2) scales each voice, so the in-game volume
+ *   settings apply; a change ramps over one render block to avoid clicks.
+ * - VoiceGetStateFlags reports playing/paused voices as in use: the game
+ *   drops a sound it believes has ended and stops updating its volume.
+ *   Pause/resume/stop events are honoured.
  * - Voice parameters are traced; only new parameter patterns are logged so
  *   the initial setup of 64+ voices does not use up the log. */
 #include "runtime.h"
@@ -22,6 +30,18 @@
 #define WAVE_TYPE_AT9 0x12u
 
 #define SAMPLER_RACK 0x1000u
+#define MASTERING_RACK 0x3000u
+/* Voice events as the game numbers them (read from its code: every voice start
+ * sends 0, its release sends 1, pause/resume send 4/5) and state flag bits. */
+#define EVENT_PLAY 0u
+#define EVENT_STOP 1u
+#define EVENT_STOP_IMM 2u
+#define EVENT_KILL 3u
+#define EVENT_PAUSE 4u
+#define EVENT_RESUME 5u
+#define STATE_INUSE 1u
+#define STATE_PLAYING 2u
+#define STATE_PAUSED 4u
 #define OUT_RATE 48000.0
 
 typedef struct At9 At9;
@@ -31,8 +51,14 @@ typedef struct {
     uint32_t type, channels, rate;      /* from the setup parameter */
     uint64_t data;                      /* guest address of the WAV file */
     uint32_t data_off, num_samples;     /* first waveform block */
-    int playing;
+    int playing, paused;
     double pos;                         /* position in source frames */
+    int gain_set;                       /* port volume received; until then 1.0 */
+    float gain, gain_cur;               /* target and last applied port volume */
+    uint64_t dest;                      /* sampler: handle of the voice it is patched to */
+    int output_set;                     /* mastering: output parameter received */
+    uint32_t output_id;                 /* mastering: index of its SystemRender buffer */
+    int routed;                         /* sampler: last buffer mixed into + 1 (for the log) */
 } Voice;
 typedef struct { uint32_t rack_id; uint32_t slot; } Rack;
 typedef struct { uint32_t id, size; uint64_t hash; unsigned seen; } Seen;
@@ -43,7 +69,7 @@ static int nracks;
 static uint64_t h_system;
 static Seen seen[512];
 static int nseen;
-static unsigned st_setup, st_blocks_ok, st_blocks_bad, st_ev0, st_ev1, st_ev1_nodata, st_ev_other;
+static unsigned st_setup, st_blocks_ok, st_blocks_bad, st_play, st_play_nodata, st_stop, st_ev_other;
 
 static void trace(const char *fmt, ...) {
     char buf[1024];
@@ -260,9 +286,35 @@ static int at9_next(At9 *a, float *l, float *r) {
     a->spos++;
     return 1;
 }
-static void mix_at9(Voice *v, float *dst, uint32_t frames) {
+/* ---- Volume ------------------------------------------------------------ */
+static float gain_target(const Voice *v) { return v->gain_set ? v->gain : 1.0f; }
+static void set_gain(Voice *v, float level) {
+    static unsigned n;
+    if (!(level >= 0.0f && level <= 4.0f)) return;  /* also rejects NaN */
+    if (v->gain_set && v->gain == level) return;
+    if (!v->gain_set) v->gain_cur = 1.0f;          /* ramp from the implicit 1.0 */
+    v->gain_set = 1;
+    v->gain = level;
+    if (n++ < 60) trace("NGS2 VOLUME voice=%u level=%.3f", v->index, (double)level);
+}
+/* Gain for frame 0 and the per-frame step that reaches the target at the end of the block. */
+static float gain_ramp(Voice *v, uint32_t frames, float *step) {
+    const float g0 = v->gain_set ? v->gain_cur : 1.0f, g1 = gain_target(v);
+    *step = frames ? (g1 - g0) / (float)frames : 0.0f;
+    v->gain_cur = g1;
+    return g0;
+}
+
+/* Adds one stereo frame to an interleaved buffer of `ch` channels (mono buffers get the average). */
+static void add_frame(float *dst, uint32_t i, uint32_t ch, float l, float r) {
+    if (ch >= 2) { dst[(size_t)i * ch] += l; dst[(size_t)i * ch + 1] += r; }
+    else dst[i] += 0.5f * (l + r);
+}
+
+static void mix_at9(Voice *v, float *dst, uint32_t frames, uint32_t ch) {
     At9 *a = v->at9;
     const double step = (double)v->rate / OUT_RATE;
+    float dg, g = gain_ramp(v, frames, &dg);
     uint32_t i;
     for (i = 0; i < frames; i++) {
         a->acc += step;
@@ -270,25 +322,29 @@ static void mix_at9(Voice *v, float *dst, uint32_t frames) {
             if (!at9_next(a, &a->l, &a->r)) { v->playing = 0; return; }
             a->acc -= 1.0;
         }
-        dst[(size_t)i * 8] += a->l;
-        dst[(size_t)i * 8 + 1] += a->r;
+        g += dg;
+        add_frame(dst, i, ch, a->l * g, a->r * g);
     }
 }
 
 /* ---- Sampler voices ---------------------------------------------------- */
 static void apply_param(Voice *v, const uint8_t *p, uint32_t size, uint32_t id) {
     static unsigned plays;
+    if (v->rack_id == MASTERING_RACK) {
+        if (id == 0x30000005u && size >= 12) { v->output_id = le32(p + 8); v->output_set = 1; }  /* output */
+        return;
+    }
     if (v->rack_id != SAMPLER_RACK) return;
     if (id == 0x10000000u && size >= 20) {            /* setup: waveform format */
         v->type = le32(p + 8); v->channels = le32(p + 12); v->rate = le32(p + 16);
         at9_free(v);
-        v->data = 0; v->num_samples = 0; v->playing = 0; v->pos = 0;
+        v->data = 0; v->num_samples = 0; v->playing = 0; v->paused = 0; v->pos = 0;
         st_setup++;
     } else if (id == 0x10000001u && size >= 32) {     /* waveform blocks */
         uint64_t data = le64(p + 8), blocks = le64(p + 24);
         uint32_t nb = le32(p + 20);
         at9_free(v);
-        v->data = 0; v->num_samples = 0; v->playing = 0; v->pos = 0;
+        v->data = 0; v->num_samples = 0; v->playing = 0; v->paused = 0; v->pos = 0;
         if (nb >= 1 && plausible(data) && plausible(blocks) && v->channels >= 1 && v->channels <= 2 && v->rate > 0) {
             const uint8_t *b = (const uint8_t *)(uintptr_t)blocks;
             uint32_t size_bytes = le32(b + 4), ns = le32(b + 16), off = le32(b);
@@ -308,23 +364,33 @@ static void apply_param(Voice *v, const uint8_t *p, uint32_t size, uint32_t id) 
             }
         }
         if (v->data) st_blocks_ok++; else st_blocks_bad++;
-    } else if (id == 0x00000006u && size >= 12) {     /* event: 1 = play */
+    } else if (id == 0x00000002u && size >= 16) {     /* port volume: port, linear level */
+        float level;
+        memcpy(&level, p + 12, 4);
+        if (le32(p + 8) == 0) set_gain(v, level);
+    } else if (id == 0x00000005u && size >= 24) {     /* patch: port, dest input, dest handle */
+        if (le32(p + 8) == 0) v->dest = le64(p + 16);
+    } else if (id == 0x00000006u && size >= 12) {     /* event */
+        static unsigned others;
         uint32_t ev = le32(p + 8);
-        if (ev == 1) {
-            st_ev1++;
-            if (!(v->data && v->num_samples)) st_ev1_nodata++;
+        if (ev == EVENT_PLAY) {
+            st_play++;
+            if (!(v->data && v->num_samples)) st_play_nodata++;
             if (v->data && v->num_samples) {
-                v->playing = 1; v->pos = 0;
+                v->playing = 1; v->paused = 0; v->pos = 0;
+                v->gain_cur = gain_target(v);
                 if (v->at9) { at9_seek(v->at9, 0); v->at9->acc = 0.0; if (v->at9->failed) v->playing = 0; }
                 if (plays++ < 60)
                     trace("NGS2 PLAY voice=%u ch=%u rate=%u samples=%u", v->index, v->channels, v->rate, v->num_samples);
             }
-        } else if (ev == 0) {
-            st_ev0++;
         } else {
-            st_ev_other++;
-            v->playing = 0;
-            trace("NGS2 EVENT %u -> stop voice=%u", ev, v->index);
+            if (ev == EVENT_STOP) st_stop++; else st_ev_other++;
+            if (ev == EVENT_STOP || ev == EVENT_STOP_IMM || ev == EVENT_KILL) { v->playing = 0; v->paused = 0; }
+            else if (ev == EVENT_PAUSE) v->paused = v->playing;
+            else if (ev == EVENT_RESUME) v->paused = 0;
+            if (ev != EVENT_STOP && others++ < 60)   /* a stop ends every sound: counted, not logged */
+                trace("NGS2 EVENT %u voice=%u -> %s", ev, v->index,
+                      !v->playing ? "stopped" : v->paused ? "paused" : "playing");
         }
     }
 }
@@ -333,11 +399,12 @@ static float pcm(const uint8_t *base, uint32_t frame, uint32_t ch, uint32_t c) {
     memcpy(&s, base + ((size_t)frame * ch + c) * 2, 2);
     return (float)s / 32768.0f;
 }
-static void mix_voice(Voice *v, float *dst, uint32_t frames) {
-    if (v->at9) { mix_at9(v, dst, frames); return; }
+static void mix_voice(Voice *v, float *dst, uint32_t frames, uint32_t out_ch) {
+    if (v->at9) { mix_at9(v, dst, frames, out_ch); return; }
     const uint8_t *base = (const uint8_t *)(uintptr_t)v->data + v->data_off;
     const uint32_t ch = v->channels;
     const double step = (double)v->rate / OUT_RATE;
+    float dg, g = gain_ramp(v, frames, &dg);
     uint32_t i;
     for (i = 0; i < frames; i++) {
         uint32_t i0 = (uint32_t)v->pos, i1;
@@ -347,10 +414,26 @@ static void mix_voice(Voice *v, float *dst, uint32_t frames) {
         frac = (float)(v->pos - (double)i0);
         l = pcm(base, i0, ch, 0) * (1.0f - frac) + pcm(base, i1, ch, 0) * frac;
         r = ch == 2 ? pcm(base, i0, ch, 1) * (1.0f - frac) + pcm(base, i1, ch, 1) * frac : l;
-        dst[(size_t)i * 8] += l;
-        dst[(size_t)i * 8 + 1] += r;
+        g += dg;
+        add_frame(dst, i, out_ch, l * g, r * g);
         v->pos += step;
     }
+}
+
+/* ---- Routing ------------------------------------------------------------ */
+typedef struct { float *p; uint32_t frames, ch; } Out;
+/* SystemRender buffer index of the mastering voice a sampler voice is patched to, or -1. */
+static int voice_output(const Voice *v) {
+    const Voice *m = v->dest ? as_voice(v->dest) : NULL;
+    return (m && m->rack_id == MASTERING_RACK && m->output_set) ? (int)m->output_id : -1;
+}
+static void clip(const Out *o) {
+    uint32_t i, c, n = o->ch < 2 ? o->ch : 2;
+    for (i = 0; i < o->frames; i++)
+        for (c = 0; c < n; c++) {
+            float *s = &o->p[(size_t)i * o->ch + c];
+            if (*s > 1.0f) *s = 1.0f; else if (*s < -1.0f) *s = -1.0f;
+        }
 }
 
 /* ---- API --------------------------------------------------------------- */
@@ -445,9 +528,15 @@ static ABI int32_t ngs2_voice_control(uint64_t voice, uint64_t list) {
 static ABI int32_t ngs2_voice_state_flags(uint64_t voice, uint32_t *flags) {
     static unsigned n;
     const Voice *v = as_voice(voice);
-    if (n < 3 || n % 2000 == 0) trace("NGS2 VoiceGetStateFlags call#%u rack=0x%x voice=%u", n, v ? v->rack_id : 0u, v ? v->index : 0u);
+    uint32_t f = 0;
+    if (!flags) return ERR_INVALID_ARG;
+    lock();
+    if (v && v->playing) f = v->paused ? (STATE_INUSE | STATE_PAUSED) : (STATE_INUSE | STATE_PLAYING);
+    unlock();
+    if (n < 3 || n % 2000 == 0)
+        trace("NGS2 VoiceGetStateFlags call#%u rack=0x%x voice=%u -> 0x%x", n, v ? v->rack_id : 0u, v ? v->index : 0u, (unsigned)f);
     n++;
-    if (flags) *flags = 0;
+    *flags = f;
     return 0;
 }
 static ABI int32_t ngs2_parse_waveform(uint64_t data, uint64_t size, uint8_t *info) {
@@ -479,17 +568,20 @@ static ABI int32_t ngs2_parse_waveform(uint64_t data, uint64_t size, uint8_t *in
     return 0;
 }
 static ABI int32_t ngs2_render(uint64_t sys, uint64_t buffers, uint64_t count) {
-    static unsigned calls;
+    static unsigned calls, routes;
     const uint8_t *b = (const uint8_t *)(uintptr_t)buffers;
+    Out outs[16];
     float *main_buf = NULL;
     uint32_t frames = 0;
     uint64_t i;
+    int main_out = -1;
     unsigned active = 0;
     (void)sys;
     { static unsigned entry; if (entry < 5) { entry++;
       trace("NGS2 RENDER ENTRY #%u sys=%llx buffers=%llx count=%llu", entry,
             (unsigned long long)sys, (unsigned long long)buffers, (unsigned long long)count); } }
     if (!plausible(buffers) || count == 0 || count > 16) return 0;
+    memset(outs, 0, sizeof outs);
     for (i = 0; i < count; i++) {
         uint64_t ptr, size;
         uint32_t type, ch;
@@ -497,30 +589,43 @@ static ABI int32_t ngs2_render(uint64_t sys, uint64_t buffers, uint64_t count) {
         memcpy(&size, b + i * 24 + 8, 8);
         memcpy(&type, b + i * 24 + 16, 4);
         memcpy(&ch, b + i * 24 + 20, 4);
+        if (calls == 0) trace("NGS2 SystemRender buffer[%llu] ptr=%llx size=%llu type=0x%x channels=%u", (unsigned long long)i,
+                              (unsigned long long)ptr, (unsigned long long)size, (unsigned)type, (unsigned)ch);
         if (!plausible(ptr) || size == 0 || size > (1u << 20)) continue;
         memset((void *)(uintptr_t)ptr, 0, (size_t)size);
-        if (!main_buf && type == 0x18 && ch == 8) {
-            main_buf = (float *)(uintptr_t)ptr;
-            frames = (uint32_t)(size / (4u * 8u));
+        if (type == 0x18 && ch >= 1 && ch <= 8) {
+            outs[i].p = (float *)(uintptr_t)ptr;
+            outs[i].ch = ch;
+            outs[i].frames = (uint32_t)(size / (4u * ch));
+            if (main_out < 0 && ch == 8) main_out = (int)i;
         }
+    }
+    if (main_out >= 0) {
+        main_buf = outs[main_out].p;
+        frames = outs[main_out].frames;
     }
     if (main_buf && frames) {
         int r;
-        uint32_t k;
         lock();
         for (r = 0; r < nracks; r++) {
             unsigned vi;
             if (racks[r].rack_id != SAMPLER_RACK) continue;
             for (vi = 0; vi < max_voice[r]; vi++) {
                 Voice *v = &voices[r][vi];
-                if (v->playing) { mix_voice(v, main_buf, frames); active++; }
+                int o;
+                if (!v->playing || v->paused) continue;
+                o = voice_output(v);
+                if (o < 0 || o >= (int)count || !outs[o].p) o = main_out;
+                if (v->routed != o + 1) {
+                    v->routed = o + 1;
+                    if (routes++ < 60) trace("NGS2 ROUTE voice=%u -> buffer %d", v->index, o);
+                }
+                mix_voice(v, outs[o].p, outs[o].frames, outs[o].ch);
+                active++;
             }
         }
         unlock();
-        for (k = 0; k < frames * 8u; k += 8) {
-            if (main_buf[k] > 1.0f) main_buf[k] = 1.0f; else if (main_buf[k] < -1.0f) main_buf[k] = -1.0f;
-            if (main_buf[k + 1] > 1.0f) main_buf[k + 1] = 1.0f; else if (main_buf[k + 1] < -1.0f) main_buf[k + 1] = -1.0f;
-        }
+        for (i = 0; i < count; i++) if (outs[i].p) clip(&outs[i]);
     }
     if (main_buf && frames) {
         static int beep_on = -1;
@@ -545,8 +650,8 @@ static ABI int32_t ngs2_render(uint64_t sys, uint64_t buffers, uint64_t count) {
     if (calls == 0 || calls == 99 || calls == 999 || (calls + 1) % 4000 == 0) {
         int r;
         trace("NGS2 SystemRender call#%u active voices=%u", calls + 1, active);
-        trace("NGS2 STATS setup=%u blocks_ok=%u blocks_bad=%u ev0=%u ev1=%u ev1_without_data=%u ev_other=%u",
-              st_setup, st_blocks_ok, st_blocks_bad, st_ev0, st_ev1, st_ev1_nodata, st_ev_other);
+        trace("NGS2 STATS setup=%u blocks_ok=%u blocks_bad=%u play=%u play_without_data=%u stop=%u other_events=%u",
+              st_setup, st_blocks_ok, st_blocks_bad, st_play, st_play_nodata, st_stop, st_ev_other);
         for (r = 0; r < nracks; r++) trace("NGS2   rack 0x%x: %u voice handles handed out", racks[r].rack_id, max_voice[r]);
     }
     calls++;

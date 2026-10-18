@@ -161,7 +161,8 @@ PATCHES_DIR=Path(__file__).resolve().parent.parent/'patches'
 # title that also recognizes a release under an ID not listed. The signatures find the sites in
 # any region or version whose code matches, so the eboot.bin build is not checked.
 GAMES=[({'CUSA01623','CUSA01715','CUSA01720'},PATCHES_DIR/'God_of_War_III_Remastered.xml','01.02',
-        'God of War III')]
+        'God of War III'),
+       ({'CUSA00368'},PATCHES_DIR/'Hotline_Miami_2_Wrong_Number.xml','01.00','Hotline Miami 2')]
 # The build the built-in Address values and third-party patch files are written for.
 REFERENCE_SHA256='d85c8135d330c3b601bf5dc3f1dd86bd6119fb8a9fce372bed2c9785f9a79299'
 DMEM_RETAIL_MB=5056  # runtime_memory.c POOL_SIZE default
@@ -231,7 +232,7 @@ EXCLUSIVE_PREFIX='Resolution Patch'
 REPLACED_BY_EXCLUSIVE={'Bug Fix - Texture Corruption Fix'}
 # Fixes with nothing to choose: not offered in the launcher and applied even with its saved list,
 # which predates them (the startup black screen fix sets a value the game overwrites at once).
-ALWAYS_ON={'Bug Fix - Startup Black Screen'}
+ALWAYS_ON={'Bug Fix - Startup Black Screen', 'Bug Fix - Worker Thread Start Race'}
 
 
 def selected_patches(xml, app_version, extra, only=False):

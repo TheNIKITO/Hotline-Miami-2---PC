@@ -6,6 +6,10 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 source ./msys2-env.sh
 [[ -f out/gow3-probe.exe && -f out/gow3-gpu-capabilities.exe && -f launcher.py ]] || { echo 'Build first (bash build.sh) and put launcher.py here.' >&2; exit 1; }
+# VERSION is the tag of the GitHub release this zip goes to (v0.2): the launcher shows it and
+# compares it with the latest release to offer updates.
+version=$(tr -d '\r\n' < VERSION 2>/dev/null || true)
+[[ $version =~ ^v[0-9]+(\.[0-9]+)*$ ]] || { echo 'VERSION must hold the release tag, e.g. v0.2' >&2; exit 1; }
 
 # A Windows Python (python.org, not MSYS2's) for PyInstaller.
 python=${WINPYTHON:-}
@@ -75,7 +79,7 @@ ldd "$dest/bin/gow3-probe.exe" "$dest/bin/gow3-gpu-capabilities.exe" |
         cp -u "$dll" "$dest/bin/"
     done
 cp -r scripts patches "$dest/"
-cp run.py LICENSE README.md "$dest/"
+cp run.py LICENSE README.md VERSION "$dest/"
 cat > "$dest/LEIA-ME.txt" <<EOF
 Hotline Miami 2: Wrong Number - port nativo para PC (nao oficial)
 =================================================================
@@ -106,4 +110,4 @@ rm -f dist/hm2-windows.zip
 (cd out/stage && powershell -NoProfile -Command \
     "Compress-Archive -Path hm2-windows -DestinationPath ../../dist/hm2-windows.zip")
 du -sh "$dest" dist/hm2-windows.zip
-echo "Pronto: dist/hm2-windows.zip"
+echo "Pronto: dist/hm2-windows.zip (versao $version: publique no Release com a tag $version)"

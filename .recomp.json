@@ -11,7 +11,7 @@
   "approach": "Native x86-64 execution of the PS4 executable, reimplemented system libraries, Vulkan renderer (shadPS4 video core)",
   "maintainers": [{ "name": "TheNIKITO", "link": "https://github.com/TheNIKITO" }],
   "links": [{ "label": "Releases", "url": "https://github.com/TheNIKITO/Hotline-Miami-2---PC/releases" }],
-  "help": ["Fullscreen, window and resolution options", "Occasional crash right at startup", "Per-voice volume and pan"],
+  "help": ["Fullscreen, window and resolution options", "Rare crash right at startup", "Sound panning"],
   "tags": ["ps4", "vulkan", "native-port", "windows"],
-  "notes": "Boots, renders, controller works, sound effects and ATRAC9 music work, launcher with folder picker and auto-retry. Known issues: occasional crash at startup (the launcher retries), no volume/pan, no window or resolution options yet. Tested on one machine and one game version. Needs your own copy of the game; none is included. Fork of gow3_pc."
+  "notes": "Boots, renders, controller works, sound effects, ATRAC9 music and the in-game volume settings work, launcher with folder picker, auto-retry and updates from GitHub Releases. Known issues: a rare crash at startup (the launcher retries), no sound panning, no window or resolution options yet. Tested on one machine and one game version. Needs your own copy of the game; none is included. Fork of gow3_pc."
 }

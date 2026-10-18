@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!-- Hotline Miami 2 port: written for the CUSA00368 v01.00 eboot.bin with sha256
+     044f0cbb2ca62e7782b31004b40c9f8a71e1d2e8fd981e255c3399743bf313c4. The signatures find the
+     sites in any build whose code matches; elsewhere the patch is skipped.
+
+     "Worker Thread Start Race": a job worker (vtable 0x19400c0) runs
+         while (running) { queue = this->queue; do r = queue->pop(-1); while (r && ...); }
+     (run() at 0x17bda20). Its owner constructs it, starts its AgThread (0x16836f0), then sets
+     running = 1 and queue = null (+0x170, +0x180 of the owner), and only afterwards assigns the
+     queue (0x16f26c5). On the PS4 the new thread never gets there first; on a PC it often does,
+     and reads leftover heap bytes (faulting through "/app0/./") or the null queue (reading 0x38
+     at 0x17836af), and the game closes right after starting.
+     Line 1: the constructor stores running/queue before creating the thread (the same 62 bytes
+             in a new order, the rip-relative thread name and the call re-targeted).
+     Line 2: run() waits for the queue: the 12-byte NOP pad after "rbx = this->queue" becomes
+             "test rbx,rbx; jne go; pause; jmp to the running check", so a stop still ends it. -->
+<Patch>
+    <TitleID>
+        <ID>CUSA00368</ID>
+    </TitleID>
+    <Metadata Title="Hotline Miami 2: Wrong Number" Name="Bug Fix - Worker Thread Start Race" Note="Makes a job worker wait until its queue is set; without it the game often crashes right after starting." Author="TheNIKITO" PatchVer="1.1" AppVer="01.00" AppElf="eboot.bin" isEnabled="true">
+        <PatchList>
+            <Line Type="bytes" Address="0x016f2650" Value="41c787700100000100000049c787800100000000000049c787780100000000000049 8dbf50010000 4c8d05{rel:name:0} ba00000200 b9ffffffff e8{rel:ctor:0}" Pattern="49 8d b7 48 01 00 00 48 8d 05 ?? ?? ?? ?? 48 83 c0 10 49 89 87 48 01 00 00 49 8d bf 50 01 00 00 4c 8d 05 ?? ?? ?? ?? ba 00 00 02 00 b9 ff ff ff ff e8 ?? ?? ?? ?? 41 c7 87 70 01 00 00 01 00 00 00 49 c7 87 80 01 00 00 00 00 00 00 49 c7 87 78 01 00 00 00 00 00 00" At="25"/>
+            <Line Type="bytes" Address="0x017bda34" Value="4885db 7507 f390 eb1c 0f1f00" Pattern="49 89 fe eb 2d 0f 1f 40 00 49 8b 5e 38 66 66 66 2e 0f 1f 84 00 00 00 00 00 be ff ff ff ff 48 89 df e8 ?? ?? ?? ?? 85 c0 74 08 8b 43 34 83 f8 ff 75 e7 41 83 7e 28 00 75 d0" At="13"/>
+        </PatchList>
+        <Target Name="name" Pattern="49 8d b7 48 01 00 00 48 8d 05 ?? ?? ?? ?? 48 83 c0 10 49 89 87 48 01 00 00 49 8d bf 50 01 00 00 4c 8d 05 ?? ?? ?? ?? ba 00 00 02 00 b9 ff ff ff ff e8 ?? ?? ?? ?? 41 c7 87 70 01 00 00 01 00 00 00" At="35" Ref="1"/>
+        <Target Name="ctor" Pattern="49 8d b7 48 01 00 00 48 8d 05 ?? ?? ?? ?? 48 83 c0 10 49 89 87 48 01 00 00 49 8d bf 50 01 00 00 4c 8d 05 ?? ?? ?? ?? ba 00 00 02 00 b9 ff ff ff ff e8 ?? ?? ?? ?? 41 c7 87 70 01 00 00 01 00 00 00" At="50" Ref="1"/>
+    </Metadata>
+</Patch>

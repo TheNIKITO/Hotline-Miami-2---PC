@@ -98,12 +98,40 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     if (!e) ++unlocks;
     return e;
 }
+/* Destroyed mutexes and condition variables stay valid in a quarantine before they are freed:
+ * guest code (Fios2 among others) unlocks or signals an object while another thread destroys
+ * it, and a late call on freed memory crashed in winpthreads (pthread_mutex_lock) or failed
+ * with EINVAL, which Fios2 treats as fatal. 4096 objects are about ten seconds of the game's
+ * churn; the oldest is released when a new one arrives. */
+#define QUARANTINE 4096
+typedef struct { pthread_cond_t native; } GuestCond;
+static struct { void *object; int is_cond; } quarantine[QUARANTINE];
+static size_t quarantine_next, retired;
+static pthread_mutex_t quarantine_lock = PTHREAD_MUTEX_INITIALIZER;
+static void retire(void *object, int is_cond) {
+    pthread_mutex_lock(&quarantine_lock);
+    void *old = quarantine[quarantine_next].object;
+    int old_is_cond = quarantine[quarantine_next].is_cond;
+    quarantine[quarantine_next].object = object;
+    quarantine[quarantine_next].is_cond = is_cond;
+    quarantine_next = (quarantine_next + 1) % QUARANTINE;
+    ++retired;
+    pthread_mutex_unlock(&quarantine_lock);
+    if (!old) return;
+    if (old_is_cond) pthread_cond_destroy(&((GuestCond *)old)->native);
+    else pthread_mutex_destroy(&((GuestMutex *)old)->native);
+    free(old);
+}
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
     if (!mutex || (uintptr_t)*mutex == 2) return orbis_error(EINVAL);
     if ((uintptr_t)*mutex < 2) return 0;
-    int e = pthread_mutex_destroy(&(*mutex)->native);
-    if (!e) { free(*mutex); *mutex = (GuestMutex *)(uintptr_t)2; }
-    return orbis_error(e);
+    GuestMutex *m = *mutex;
+    int e = pthread_mutex_trylock(&m->native);  /* a held mutex is busy, as destroy reports */
+    if (e) return orbis_error(e == EDEADLK ? EBUSY : e);
+    pthread_mutex_unlock(&m->native);
+    *mutex = (GuestMutex *)(uintptr_t)2;
+    retire(m, 0);
+    return 0;
 }
 static int deadline_after(struct timespec *end, uint64_t usec) {
     if (clock_gettime(CLOCK_REALTIME, end)) return errno;
@@ -124,7 +152,6 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
 }
 /* Condition variables: opaque handles over host pthread_cond (CLOCK_REALTIME,
  * like FreeBSD's default), sharing the host mutex behind GuestMutex. */
-typedef struct { pthread_cond_t native; } GuestCond;
 static size_t conds, waits, wakeups;
 static ABI int32_t cond_init(GuestCond **out, void **attr, const char *name) {
     (void)attr; (void)name;
@@ -151,9 +178,10 @@ static int32_t ensure_cond(GuestCond **cond) {
 static ABI int32_t cond_destroy(GuestCond **cond) {
     if (!cond) return orbis_error(EINVAL);
     if ((uintptr_t)*cond < 2) return 0;
-    int e = pthread_cond_destroy(&(*cond)->native);
-    if (!e) { free(*cond); *cond = NULL; }
-    return orbis_error(e);
+    GuestCond *c = *cond;
+    *cond = NULL;
+    retire(c, 1);
+    return 0;
 }
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     int32_t e = ensure_cond(cond);
@@ -252,7 +280,8 @@ uintptr_t runtime_mutex_resolve(const char *name) {
     return 0;
 }
 void runtime_mutex_report(void) {
-    printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu\n", created, locks, unlocks);
+    printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu; destroyed mutexes and conds quarantined=%zu\n",
+           created, locks, unlocks, retired);
     printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
 }
 
