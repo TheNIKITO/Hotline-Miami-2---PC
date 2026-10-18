@@ -3,7 +3,7 @@
   "game": "Hotline Miami 2: Wrong Number",
   "system": "PS4",
   "type": "recomp",
-  "original": { "serial": "CUSA00368" },
+  "original": { "region": "USA", "revision": "01.00", "serial": "CUSA00368" },
   "project": "Hotline Miami 2 - PC",
   "status": "playable",
   "targets": ["Windows"],
