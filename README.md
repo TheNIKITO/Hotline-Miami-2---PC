@@ -10,7 +10,20 @@ núcleo de vídeo do shadPS4. É um fork do `gow3_pc`.
 
 ## Estado atual
 
-Testado com a versão `CUSA00368`, em Windows 11 com uma RTX 5060 Ti.
+Testado em Windows 11 com uma RTX 5060 Ti, com esta versão do jogo:
+
+| | |
+| --- | --- |
+| Título | Hotline Miami 2: Wrong Number |
+| ID do título | `CUSA00368` (EUA) |
+| ID do conteúdo | `UP3643-CUSA00368_00-HOTLINEMIAMI2000` |
+| Versão do jogo (`APP_VER`) | `01.00` |
+| Versão master (`VERSION`) | `01.01` |
+| SHA-256 do `eboot.bin` | `044f0cbb2ca62e7782b31004b40c9f8a71e1d2e8fd981e255c3399743bf313c4` |
+
+Para conferir a sua cópia, rode no PowerShell, dentro da pasta do jogo:
+`Get-FileHash .\eboot.bin -Algorithm SHA256`. Se o resultado for igual ao da tabela (o PowerShell mostra
+em maiúsculas), é a mesma versão.
 
 Funciona:
 - O jogo abre, renderiza e responde ao controle.
@@ -88,8 +101,8 @@ Licença: **GPL-2.0 ou posterior** (arquivo `LICENSE`).
 
 ## English summary
 
-Unofficial, experimental native PC port of *Hotline Miami 2: Wrong Number* (PS4 build `CUSA00368`)
-for 64-bit Windows 10/11. The game's x86-64 executable runs natively; system libraries are
+Unofficial, experimental native PC port of *Hotline Miami 2: Wrong Number* (PS4 build `CUSA00368`,
+USA, app version 01.00, `eboot.bin` SHA-256 `044f0cbb…bf313c4`) for 64-bit Windows 10/11. The game's x86-64 executable runs natively; system libraries are
 reimplemented and graphics go through Vulkan (shadPS4 video core). It is a fork of `gow3_pc`.
 **No game files are included**: you need your own copy. Working: rendering, controller, sound
 effects and ATRAC9 music, launcher. Known issues: occasional crash at startup (the launcher
